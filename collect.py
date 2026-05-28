@@ -103,7 +103,8 @@ def _prices(house_manage_no: str, key: str) -> list[dict]:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--new-days", type=int, default=3, help="신규=모집공고일 최근 N일")
+    ap.add_argument("--new-days", type=int, default=0,
+                    help="신규=모집공고일 최근 N일 (0=당일만). 저녁 실행 시 당일 공고 1회 포착")
     ap.add_argument("--soon-days", type=int, default=3, help="임박=접수시작 향후 N일")
     ap.add_argument("--lookback", type=int, default=60, help="공고 조회 lookback(일)")
     args = ap.parse_args()
