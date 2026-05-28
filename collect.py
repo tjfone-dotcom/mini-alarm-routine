@@ -147,7 +147,7 @@ def main() -> None:
     endpoints = (
         ("getAPTLttotPblancDetail", "분양", fetch_from),
         ("getRemndrLttotPblancDetail", "무순위", fetch_from),
-        ("getOptLttotPblancDetail", "임의공급", fetch_from_c),
+        ("getOPTLttotPblancDetail", "임의공급", fetch_from_c),
     )
     rows = []
     for op, kind, frm in endpoints:
