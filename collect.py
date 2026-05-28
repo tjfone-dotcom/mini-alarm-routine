@@ -60,10 +60,20 @@ def _get(operation: str, key: str, cond: dict | None = None, per_page: int = 100
     return out
 
 
+def _d(s) -> str | None:
+    """날짜 정규화: 'YYYYMMDD'(임의공급) / 'YYYY-MM-DD'(분양·무순위) → 'YYYY-MM-DD'."""
+    if not s:
+        return None
+    s = str(s).strip()
+    if len(s) == 8 and s.isdigit():
+        return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
+    return s
+
+
 def _norm(row: dict, kind: str) -> dict:
     if kind == "분양":
         bgn, end = row.get("RCEPT_BGNDE"), row.get("RCEPT_ENDDE")
-    else:
+    else:  # 무순위 / 임의공급
         bgn = row.get("SUBSCRPT_RCEPT_BGNDE") or row.get("GNRL_RCEPT_BGNDE")
         end = row.get("SUBSCRPT_RCEPT_ENDDE") or row.get("GNRL_RCEPT_ENDDE")
     return {
@@ -73,9 +83,9 @@ def _norm(row: dict, kind: str) -> dict:
         "지역": row.get("SUBSCRPT_AREA_CODE_NM"),
         "주소": row.get("HSSPLY_ADRES"),
         "주택구분": row.get("HOUSE_DTL_SECD_NM") or row.get("HOUSE_SECD_NM"),
-        "모집공고일": row.get("RCRIT_PBLANC_DE"),
-        "접수시작": bgn,
-        "접수종료": end,
+        "모집공고일": _d(row.get("RCRIT_PBLANC_DE")),
+        "접수시작": _d(bgn),
+        "접수종료": _d(end),
         "공급세대수": row.get("TOT_SUPLY_HSHLDCO"),
         "입주예정월": row.get("MVN_PREARNGE_YM"),
         "공고URL": row.get("PBLANC_URL"),
@@ -129,14 +139,20 @@ def main() -> None:
     today_s = today.isoformat()
     new_from = (today - timedelta(days=args.new_days)).isoformat()
     soon_to = (today + timedelta(days=args.soon_days)).isoformat()
-    fetch_from = (today - timedelta(days=args.lookback)).isoformat()
+    fetch_from = (today - timedelta(days=args.lookback)).isoformat()   # YYYY-MM-DD (분양·무순위)
+    fetch_from_c = fetch_from.replace("-", "")                          # YYYYMMDD (임의공급)
 
-    # 공고 lookback 윈도우로 수도권 분양/무순위 모두 수집
+    # 공고 lookback 윈도우로 수도권 분양 + 줍줍(무순위/잔여세대, 임의공급) 모두 수집
+    # 줍줍 = 무순위(사후)·불법행위 재공급(→getRemndr) + 임의공급(→getOpt)
+    endpoints = (
+        ("getAPTLttotPblancDetail", "분양", fetch_from),
+        ("getRemndrLttotPblancDetail", "무순위", fetch_from),
+        ("getOptLttotPblancDetail", "임의공급", fetch_from_c),
+    )
     rows = []
-    for op, kind in (("getAPTLttotPblancDetail", "분양"),
-                     ("getRemndrLttotPblancDetail", "무순위")):
+    for op, kind, frm in endpoints:
         try:
-            for r in _get(op, key, {"cond[RCRIT_PBLANC_DE::GTE]": fetch_from}):
+            for r in _get(op, key, {"cond[RCRIT_PBLANC_DE::GTE]": frm}):
                 if r.get("SUBSCRPT_AREA_CODE_NM") in _CAPITAL:
                     rows.append(_norm(r, kind))
         except Exception as e:
