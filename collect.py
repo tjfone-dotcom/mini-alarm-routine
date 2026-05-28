@@ -93,31 +93,47 @@ def _norm(row: dict, kind: str) -> dict:
     }
 
 
-def _prices(house_manage_no: str, key: str) -> list[dict]:
-    """주택형별 분양가(최고가, 만원) → 전용면적/공급면적/분양가억 요약."""
-    if not house_manage_no:
+# 유형별 주택형(분양가) 엔드포인트
+_MDL_OP = {
+    "분양": "getAPTLttotPblancMdl",
+    "무순위": "getRemndrLttotPblancMdl",
+    "임의공급": "getOPTLttotPblancMdl",
+}
+
+
+def _prices(kind: str, house_manage_no: str, key: str) -> list[dict]:
+    """주택형별 분양가(최고가, 만원) → 전용면적/공급면적/분양가억 요약.
+
+    유형별로 엔드포인트가 다름. 줍줍(무순위/임의공급) 금액은 콤마 포함('46,357')일 수
+    있고, 임의공급 Mdl엔 공급면적(SUPLY_AR)이 없을 수 있어 모두 방어적으로 처리.
+    """
+    op = _MDL_OP.get(kind)
+    if not op or not house_manage_no:
         return []
-    rows = _get("getAPTLttotPblancMdl", key,
-                {"cond[HOUSE_MANAGE_NO::EQ]": house_manage_no})
+    try:
+        rows = _get(op, key, {"cond[HOUSE_MANAGE_NO::EQ]": house_manage_no})
+    except Exception:
+        return []
     out = []
     for r in rows:
-        ty = str(r.get("HOUSE_TY") or "")
+        ty = str(r.get("HOUSE_TY") or "").strip()
         try:
             exclusive = round(float(ty.split(".")[0])) if ty else None
         except ValueError:
             exclusive = None
         amt = r.get("LTTOT_TOP_AMOUNT")
-        try:
-            eok = round(int(amt) / 10000, 2) if amt not in (None, "") else None
-        except ValueError:
-            eok = None
+        eok = None
+        if amt not in (None, ""):
+            try:
+                eok = round(int(str(amt).replace(",", "").strip()) / 10000, 2)
+            except ValueError:
+                eok = None
         out.append({
             "전용": exclusive,
-            "공급면적": r.get("SUPLY_AR"),
+            "공급면적": r.get("SUPLY_AR"),   # 임의공급은 없을 수 있음(None)
             "분양가억": eok,
             "일반공급세대": r.get("SUPLY_HSHLDCO"),
         })
-    # 전용면적 오름차순
     out.sort(key=lambda x: (x["전용"] is None, x["전용"] or 0))
     return out
 
@@ -176,8 +192,7 @@ def main() -> None:
     for x in rows:
         pub = x["모집공고일"] or ""
         if pub >= new_from and x["id"] not in sent_ids:   # 신규 후보 - 미발송
-            if x["유형"] == "분양":
-                x["평형분양가"] = _prices(x["_house_manage_no"], key)
+            x["평형분양가"] = _prices(x["유형"], x["_house_manage_no"], key)
             x.pop("_house_manage_no", None)
             new_listings.append(x)
             seen_new.add((x["단지명"], x["지역"]))
