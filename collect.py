@@ -31,6 +31,7 @@ _CAPITAL = {"서울", "경기", "인천"}
 
 
 def _get(operation: str, key: str, cond: dict | None = None, per_page: int = 100) -> list[dict]:
+    import time
     out, page = [], 1
     while True:
         params = {"page": page, "perPage": per_page, "serviceKey": key}
@@ -38,9 +39,18 @@ def _get(operation: str, key: str, cond: dict | None = None, per_page: int = 100
             params.update(cond)
         url = f"{_BASE}/{operation}?{urllib.parse.urlencode(params)}"
         req = urllib.request.Request(url, headers={"accept": "application/json"})
-        with urllib.request.urlopen(req, timeout=25) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        rows = data.get("data") or []
+        # data.go.kr 간헐적 4xx/5xx 대비 재시도
+        data = None
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(req, timeout=25) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                break
+            except Exception:
+                if attempt == 2:
+                    raise
+                time.sleep(2)
+        rows = (data or {}).get("data") or []
         out.extend(rows)
         if len(rows) < per_page:
             break
@@ -57,6 +67,7 @@ def _norm(row: dict, kind: str) -> dict:
         bgn = row.get("SUBSCRPT_RCEPT_BGNDE") or row.get("GNRL_RCEPT_BGNDE")
         end = row.get("SUBSCRPT_RCEPT_ENDDE") or row.get("GNRL_RCEPT_ENDDE")
     return {
+        "id": f"{row.get('HOUSE_MANAGE_NO')}_{row.get('PBLANC_NO')}",
         "유형": kind,
         "단지명": row.get("HOUSE_NM"),
         "지역": row.get("SUBSCRPT_AREA_CODE_NM"),
@@ -103,8 +114,8 @@ def _prices(house_manage_no: str, key: str) -> list[dict]:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--new-days", type=int, default=0,
-                    help="신규=모집공고일 최근 N일 (0=당일만). 저녁 실행 시 당일 공고 1회 포착")
+    ap.add_argument("--new-days", type=int, default=7,
+                    help="신규 후보=모집공고일 최근 N일. 발송이력(state/sent.json) 대조로 중복 제거")
     ap.add_argument("--soon-days", type=int, default=3, help="임박=접수시작 향후 N일")
     ap.add_argument("--lookback", type=int, default=60, help="공고 조회 lookback(일)")
     args = ap.parse_args()
@@ -134,11 +145,21 @@ def main() -> None:
     # 접수 미마감만
     rows = [x for x in rows if not x["접수종료"] or x["접수종료"] >= today_s]
 
+    # 이미 보낸 공고 id (state/sent.json) 로드 → 중복 제거
+    sent_ids = set()
+    state_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state", "sent.json")
+    if os.path.exists(state_path):
+        try:
+            with open(state_path, encoding="utf-8") as f:
+                sent_ids = set(json.load(f).get("sent", []))
+        except (json.JSONDecodeError, OSError):
+            pass
+
     new_listings, upcoming = [], []
     seen_new = set()
     for x in rows:
         pub = x["모집공고일"] or ""
-        if pub >= new_from:                      # 신규 공고
+        if pub >= new_from and x["id"] not in sent_ids:   # 신규 후보 - 미발송
             if x["유형"] == "분양":
                 x["평형분양가"] = _prices(x["_house_manage_no"], key)
             x.pop("_house_manage_no", None)
