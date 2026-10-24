@@ -5,7 +5,7 @@
 
 ## 동작 방식
 
-routine이 평일 07:30(KST)에 이 저장소를 클론하고 `INSTRUCTIONS.md`대로 실행한다.
+routine이 평일 09:02(KST)에 이 저장소를 클론하고 `INSTRUCTIONS.md`대로 실행한다.
 
 1. `python3 pipeline.py prepare` — 청약홈 API 수집, 발송 이력 대조, 같은 단지 묶기, 분석 캐시 조회.
    새로 분석할 단지만 `to_analyze`로 출력한다.
