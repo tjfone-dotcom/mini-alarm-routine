@@ -60,7 +60,7 @@ python3 pipeline.py finish
 
 ---
 
-## 참고 — 별점 산식 (`digest.score`, 기본 3점, 1~5로 제한)
+## 참고 — 별점 산식 (`digest.score`, 기본 2점, 1~5로 제한)
 
 | 조건 | 점수 |
 |---|---|

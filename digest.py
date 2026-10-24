@@ -35,8 +35,8 @@ def complex_key(item: dict) -> str:
 # ---------- 별점 ----------
 
 def score(item: dict, a: dict, rnd: int) -> tuple[int, list[str]]:
-    """기본 3점에서 가감, 1~5로 제한. 근거 항목 목록도 반환."""
-    s, why = 3, []
+    """기본 2점에서 가감, 1~5로 제한(★5는 긍정 신호 3개 이상). 근거 항목 목록도 반환."""
+    s, why = 2, []
 
     def add(n: int, label: str) -> None:
         nonlocal s

@@ -45,13 +45,16 @@ class TestScore(unittest.TestCase):
 
     def test_repeat_supply_penalty_floor_1(self):
         s, why = digest.score(item(유형="임의공급"), {"여론": "부정"}, 19)
-        self.assertEqual(s, 1)  # 3 +1(줍줍) -1(여론) -2(반복) = 1
+        self.assertEqual(s, 1)  # 2 +1(줍줍) -1(여론) -2(반복) = 0 → 1
         self.assertIn("반복재공급−2", why)
 
     def test_presale_size(self):
         self.assertIn("대단지+1", digest.score(item(공급세대수=1200), {}, 1)[1])
         self.assertIn("소규모−1", digest.score(item(공급세대수=61), {}, 1)[1])
-        self.assertEqual(digest.score(item(공급세대수=500), {}, 1), (3, []))
+        self.assertEqual(digest.score(item(공급세대수=500), {}, 1), (2, []))
+
+    def test_two_signals_is_not_top(self):
+        self.assertEqual(digest.score(item(), {"역세권": True, "여론": "긍정"}, 1)[0], 4)
 
 
 class TestMissedRuns(unittest.TestCase):
