@@ -1,37 +1,45 @@
 #!/usr/bin/env python3
-"""청약홈 수집 → 두 버킷으로 정규화 JSON 출력 (결정론적).
+"""청약홈 OpenAPI 수집 (결정론적). pipeline.py가 import해서 쓴다.
 
-- new_listings:  모집공고일이 최근 --new-days 일 이내(분양+무순위, 접수 미마감).
-                 분양 건은 주택형별 분양가까지 enrich → "분양 정보 + 분석"용.
-- upcoming:      접수시작이 오늘~+--soon-days 일 이내이거나 진행 중인 건(분양+무순위).
-                 new_listings 와 중복 제외 → "접수 임박/진행 단순 알림"용.
+- new_listings: 모집공고일이 최근 new_days일 이내이고 아직 안 보낸 건(분양·무순위·임의공급,
+                접수 미마감). 주택형별 분양가까지 붙인다.
+- upcoming:     접수시작이 오늘~+soon_days일 이내이거나 진행 중인 건. new_listings와 중복 제외.
+- warnings:     엔드포인트 수집 실패 등. 놓친 건은 7일 윈도우 덕에 다음 실행에서 복구된다.
 
-엔드포인트·필드는 고정. 에이전트는 이 출력만 받아 정해진 템플릿으로 렌더링한다.
-
-사용법: DATA_GO_KR_KEY=xxx python collect.py
-환경변수: DATA_GO_KR_KEY
-출력: stdout JSON (UTF-8)
+단독 실행(디버그용): DATA_GO_KR_KEY=xxx python3 collect.py
 """
-import argparse
 import json
 import os
 import sys
+import time
 import urllib.parse
 import urllib.request
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
-try:
-    sys.stdout.reconfigure(encoding="utf-8")
-except Exception:
-    pass
-
+KST = timezone(timedelta(hours=9))
 _BASE = "https://api.odcloud.kr/api/ApplyhomeInfoDetailSvc/v1"
-_KST = timezone(timedelta(hours=9))
 _CAPITAL = {"서울", "경기", "인천"}
+
+# (상세 엔드포인트, 유형, 모집공고일 형식). 임의공급만 날짜가 YYYYMMDD.
+# 무순위 엔드포인트는 무순위(04)와 불법행위 재공급(06)을 함께 준다.
+_ENDPOINTS = (
+    ("getAPTLttotPblancDetail", "분양", "dash"),
+    ("getRemndrLttotPblancDetail", "무순위", "dash"),
+    ("getOPTLttotPblancDetail", "임의공급", "compact"),
+)
+# 유형별 주택형(분양가) 엔드포인트
+_MDL_OP = {
+    "분양": "getAPTLttotPblancMdl",
+    "무순위": "getRemndrLttotPblancMdl",
+    "임의공급": "getOPTLttotPblancMdl",
+}
+
+
+def today_kst() -> date:
+    return datetime.now(KST).date()
 
 
 def _get(operation: str, key: str, cond: dict | None = None, per_page: int = 100) -> list[dict]:
-    import time
     out, page = [], 1
     while True:
         params = {"page": page, "perPage": per_page, "serviceKey": key}
@@ -39,9 +47,8 @@ def _get(operation: str, key: str, cond: dict | None = None, per_page: int = 100
             params.update(cond)
         url = f"{_BASE}/{operation}?{urllib.parse.urlencode(params)}"
         req = urllib.request.Request(url, headers={"accept": "application/json"})
-        # data.go.kr 간헐적 4xx/5xx 대비 재시도
         data = None
-        for attempt in range(3):
+        for attempt in range(3):  # data.go.kr 간헐적 4xx/5xx 대비
             try:
                 with urllib.request.urlopen(req, timeout=25) as resp:
                     data = json.loads(resp.read().decode("utf-8"))
@@ -52,11 +59,9 @@ def _get(operation: str, key: str, cond: dict | None = None, per_page: int = 100
                 time.sleep(2)
         rows = (data or {}).get("data") or []
         out.extend(rows)
-        if len(rows) < per_page:
+        if len(rows) < per_page or page >= 30:
             break
         page += 1
-        if page > 30:
-            break
     return out
 
 
@@ -79,6 +84,7 @@ def _norm(row: dict, kind: str) -> dict:
     return {
         "id": f"{row.get('HOUSE_MANAGE_NO')}_{row.get('PBLANC_NO')}",
         "유형": kind,
+        "세부유형": row.get("HOUSE_SECD_NM"),  # 무순위/불법행위 재공급/임의공급/APT 등
         "단지명": row.get("HOUSE_NM"),
         "지역": row.get("SUBSCRPT_AREA_CODE_NM"),
         "주소": row.get("HSSPLY_ADRES"),
@@ -93,20 +99,9 @@ def _norm(row: dict, kind: str) -> dict:
     }
 
 
-# 유형별 주택형(분양가) 엔드포인트
-_MDL_OP = {
-    "분양": "getAPTLttotPblancMdl",
-    "무순위": "getRemndrLttotPblancMdl",
-    "임의공급": "getOPTLttotPblancMdl",
-}
-
-
-def _prices(kind: str, house_manage_no: str, key: str) -> list[dict]:
-    """주택형별 분양가(최고가, 만원) → 전용면적/공급면적/분양가억 요약.
-
-    유형별로 엔드포인트가 다름. 줍줍(무순위/임의공급) 금액은 콤마 포함('46,357')일 수
-    있고, 임의공급 Mdl엔 공급면적(SUPLY_AR)이 없을 수 있어 모두 방어적으로 처리.
-    """
+def _prices(kind: str, house_manage_no, key: str) -> list[dict]:
+    """주택형별 분양가(최고가, 만원 → 억). 줍줍 금액은 콤마 포함일 수 있고,
+    임의공급 Mdl엔 공급면적이 없을 수 있어 방어적으로 처리."""
     op = _MDL_OP.get(kind)
     if not op or not house_manage_no:
         return []
@@ -128,100 +123,66 @@ def _prices(kind: str, house_manage_no: str, key: str) -> list[dict]:
                 eok = round(int(str(amt).replace(",", "").strip()) / 10000, 2)
             except ValueError:
                 eok = None
-        out.append({
-            "전용": exclusive,
-            "공급면적": r.get("SUPLY_AR"),   # 임의공급은 없을 수 있음(None)
-            "분양가억": eok,
-            "일반공급세대": r.get("SUPLY_HSHLDCO"),
-        })
+        out.append({"전용": exclusive, "분양가억": eok, "일반공급세대": r.get("SUPLY_HSHLDCO")})
     out.sort(key=lambda x: (x["전용"] is None, x["전용"] or 0))
     return out
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--new-days", type=int, default=7,
-                    help="신규 후보=모집공고일 최근 N일. 발송이력(state/sent.json) 대조로 중복 제거")
-    ap.add_argument("--soon-days", type=int, default=3, help="임박=접수시작 향후 N일")
-    ap.add_argument("--lookback", type=int, default=60, help="공고 조회 lookback(일)")
-    args = ap.parse_args()
-
-    key = os.environ.get("DATA_GO_KR_KEY", "").strip()
-    if not key:
-        print("ERROR: DATA_GO_KR_KEY 환경변수가 필요합니다.", file=sys.stderr)
-        sys.exit(2)
-
-    today = datetime.now(_KST).date()
+def collect(key: str, sent_ids: set[str], today: date | None = None,
+            new_days: int = 7, soon_days: int = 3, lookback: int = 60) -> dict:
+    today = today or today_kst()
     today_s = today.isoformat()
-    new_from = (today - timedelta(days=args.new_days)).isoformat()
-    soon_to = (today + timedelta(days=args.soon_days)).isoformat()
-    fetch_from = (today - timedelta(days=args.lookback)).isoformat()   # YYYY-MM-DD (분양·무순위)
-    fetch_from_c = fetch_from.replace("-", "")                          # YYYYMMDD (임의공급)
+    new_from = (today - timedelta(days=new_days)).isoformat()
+    soon_to = (today + timedelta(days=soon_days)).isoformat()
+    fetch_from = (today - timedelta(days=lookback)).isoformat()
 
-    # 공고 lookback 윈도우로 수도권 분양 + 줍줍(무순위/잔여세대, 임의공급) 모두 수집
-    # 줍줍 = 무순위(사후)·불법행위 재공급(→getRemndr) + 임의공급(→getOpt)
-    endpoints = (
-        ("getAPTLttotPblancDetail", "분양", fetch_from),
-        ("getRemndrLttotPblancDetail", "무순위", fetch_from),
-        ("getOPTLttotPblancDetail", "임의공급", fetch_from_c),
-    )
-    rows = []
-    for op, kind, frm in endpoints:
+    rows, warnings = [], []
+    for op, kind, fmt in _ENDPOINTS:
+        frm = fetch_from if fmt == "dash" else fetch_from.replace("-", "")
         try:
             for r in _get(op, key, {"cond[RCRIT_PBLANC_DE::GTE]": frm}):
                 if r.get("SUBSCRPT_AREA_CODE_NM") in _CAPITAL:
                     rows.append(_norm(r, kind))
         except Exception as e:
-            print(f"WARN: {op} 수집 실패: {e}", file=sys.stderr)
+            warnings.append(f"{kind} 수집 실패({type(e).__name__}) — 다음 실행에서 자동 복구")
 
-    # 접수 미마감만
-    rows = [x for x in rows if not x["접수종료"] or x["접수종료"] >= today_s]
+    rows = [x for x in rows if not x["접수종료"] or x["접수종료"] >= today_s]  # 접수 미마감만
 
-    # 이미 보낸 공고 id (state/sent.json) 로드 → 중복 제거
-    sent_ids = set()
-    state_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state", "sent.json")
-    if os.path.exists(state_path):
-        try:
-            with open(state_path, encoding="utf-8") as f:
-                sent_ids = set(json.load(f).get("sent", []))
-        except (json.JSONDecodeError, OSError):
-            pass
-
-    new_listings, upcoming = [], []
-    seen_new = set()
+    new_listings, seen_new = [], set()
     for x in rows:
-        pub = x["모집공고일"] or ""
-        if pub >= new_from and x["id"] not in sent_ids:   # 신규 후보 - 미발송
+        if (x["모집공고일"] or "") >= new_from and x["id"] not in sent_ids:
             x["평형분양가"] = _prices(x["유형"], x["_house_manage_no"], key)
-            x.pop("_house_manage_no", None)
             new_listings.append(x)
             seen_new.add((x["단지명"], x["지역"]))
-
     for x in rows:
-        key2 = (x["단지명"], x["지역"])
-        if key2 in seen_new:
+        x.pop("_house_manage_no", None)
+
+    upcoming = []
+    for x in rows:
+        if (x["단지명"], x["지역"]) in seen_new:
             continue
-        bgn = x["접수시작"] or ""
-        end = x["접수종료"] or ""
-        imminent = bool(bgn) and today_s <= bgn <= soon_to        # 곧 시작
-        ongoing = bool(bgn) and bool(end) and bgn <= today_s <= end  # 진행 중
+        bgn, end = x["접수시작"] or "", x["접수종료"] or ""
+        imminent = bool(bgn) and today_s <= bgn <= soon_to
+        ongoing = bool(bgn) and bool(end) and bgn <= today_s <= end
         if imminent or ongoing:
             upcoming.append({
                 "유형": x["유형"], "단지명": x["단지명"], "지역": x["지역"],
                 "접수시작": x["접수시작"], "접수종료": x["접수종료"],
-                "공고URL": x["공고URL"],
-                "상태": "진행중" if ongoing else "임박",
+                "공고URL": x["공고URL"], "상태": "진행중" if ongoing else "임박",
             })
-
     upcoming.sort(key=lambda x: x["접수시작"] or "")
-    print(json.dumps({
-        "as_of": today_s,
-        "new_count": len(new_listings),
-        "upcoming_count": len(upcoming),
-        "new_listings": new_listings,
-        "upcoming": upcoming,
-    }, ensure_ascii=False, indent=1))
+
+    return {"as_of": today_s, "new_listings": new_listings,
+            "upcoming": upcoming, "warnings": warnings}
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+    import state
+    k = os.environ.get("DATA_GO_KR_KEY", "").strip()
+    if not k:
+        sys.exit("ERROR: DATA_GO_KR_KEY 환경변수가 필요합니다.")
+    print(json.dumps(collect(k, state.load().sent), ensure_ascii=False, indent=1))
